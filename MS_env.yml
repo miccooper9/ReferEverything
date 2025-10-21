@@ -1,0 +1,59 @@
+name: MS_env
+channels:
+  - pytorch
+  - nvidia
+  - xformers
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch=1.13.1
+  - torchvision=0.14.1
+  - pytorch-cuda=11.7
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - scikit-image
+  - matplotlib
+  - seaborn
+  - tqdm
+  - pillow
+  - h5py
+  - absl-py
+  - protobuf
+  - pyyaml
+  - requests
+  - regex
+  - click
+  - packaging
+  - filelock
+  - tabulate
+  - opencv-python
+  - pip:
+      
+      - transformers==4.31.0
+      - diffusers==0.15.0
+      - accelerate==0.27.2
+      - xformers==0.0.22.post7
+      - safetensors==0.4.2
+      - einops==0.7.0
+      - fvcore==0.1.5.post20221221
+      - iopath==0.1.9
+      - visdom==0.2.4
+      - wandb==0.16.3
+      - tensorboard==2.15.2
+      - tensorboardX==2.6.2.2
+      - huggingface-hub==0.21.3
+      - gitpython==3.1.42
+      - easydict==1.13
+      - yacs==0.1.8
+      - shapely==2.0.4
+      - motmetrics==1.4.0
+      - imageio==2.34.0
+      - tifffile==2024.2.12
+      - wget==3.2
+      - tikzplotlib==0.10.1
+      - rich==13.7.1
+      - pycocotools @ git+https://github.com/XD7479/cocoapi.git@772b85a787ef554a732d4cb9abe317d61602af83#subdirectory=PythonAPI

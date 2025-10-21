@@ -1,0 +1,638 @@
+
+import argparse
+import datetime
+import json
+import random
+
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+import torch
+from PIL import Image
+from einops import rearrange
+
+#import datasets.samplers as samplers
+from datasets import build_dataset
+from davis2017.evaluation import DAVISEvaluation
+#from engine import train_one_epoch, evaluate, evaluate_a2d, evaluate_online_a2d
+#from models import build_model
+from tqdm import tqdm
+import os
+from torch import nn
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+import torchvision.transforms as T
+import pandas as pd
+import wandb
+from models.mst2v_wrapper import build_vdiff_lean_updown
+import opts
+#from tensorboardX import SummaryWriter
+
+# build transform
+transform = T.Compose([
+    T.Resize((512,512)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
+
+
+
+transform256 = T.Compose([
+    T.Resize((256,256)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
+
+def evaluate(args,  backbone, epoch) :
+
+    root = Path(args.davis_path)  # data/ref-davis
+    img_folder = os.path.join(root, 'valid', "JPEGImages")
+    meta_file = os.path.join(root, "meta_expressions", 'valid', "meta_expressions.json")
+    with open(meta_file, "r") as f:
+        data = json.load(f)["videos"]
+    video_list = list(data.keys())
+
+    save_path_prefix = os.path.join(args.val_vis, f'r_davis_{args.iteration}')
+
+    if not os.path.exists(save_path_prefix):
+        os.makedirs(save_path_prefix)
+
+    # get palette
+    palette_img_path = os.path.join(args.davis_path, "valid/Annotations/blackswan/00000.png")
+    palette_img = Image.open(palette_img_path)
+    palette = palette_img.getpalette()
+
+    max_token_len = -1
+    
+    for video in tqdm(video_list):
+
+        metas = []
+
+        expressions = data[video]["expressions"]
+        expression_list = list(expressions.keys())
+        num_expressions = len(expression_list)
+        video_len = len(data[video]["frames"])
+
+        print(f"-----{video}-----{num_expressions}")
+
+        # read all the anno meta
+        for i in range(num_expressions):
+
+            
+
+            meta = {}
+            meta["video"] = video
+            meta["exp"] = expressions[expression_list[i]]["exp"]
+            meta["exp_id"] = expression_list[i]  # start from 0
+            meta["frames"] = data[video]["frames"]
+            metas.append(meta)
+
+
+            exp=meta["exp"]
+            #print(f"----------{exp}")
+
+
+        meta = metas
+        # since there are 4 annotations
+        num_obj = num_expressions // 4
+
+
+        for anno_id in range(4):  # 4 annotators
+            anno_logits = []
+            anno_masks = []  # [num_obj+1, video_len, h, w], +1 for background
+
+            with torch.no_grad() :
+                for obj_id in range(num_obj):
+                    i = obj_id * 4 + anno_id
+                    video_name = meta[i]["video"]
+                    exp = meta[i]["exp"]
+                    exp_id = meta[i]["exp_id"]
+                    frames = meta[i]["frames"]
+
+                    video_len = len(frames)
+                    print(f"{exp} video_len {video_len}")
+                    # NOTE: the im2col_step for MSDeformAttention is set as 64
+                    # so the max length for a clip is 64
+                    # store the video pred results
+                    all_pred_logits = []
+                    all_pred_masks = []
+
+                    text_in = backbone.tokenizer(
+                        exp,
+                        padding="max_length",
+                        max_length=backbone.tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt")
+
+
+                    prompt_embeds = backbone.text_encoder(
+                                    text_in.input_ids.to(args.device),
+                                    #attention_mask=text_in.attention_mask.to(args.device),
+                                    )[0]
+                    
+                    attention_mask = text_in['attention_mask'][:, :args.token_length]
+                    masks = ~attention_mask.to(torch.bool)
+
+                    print("prompt embeds : ", prompt_embeds.shape)
+                    #for k,v in text_in.items() :
+                    #    print(k,"----", v.shape)
+
+                    tokens = backbone.tokenizer.encode(exp)
+                    print(exp,len(tokens),tokens)
+                    print(attention_mask.shape, masks.shape)
+                    print(attention_mask[0,0:20])
+                    print(masks[0,0:20])
+
+                    if max_token_len <= len(tokens) :
+                        max_token_len = len(tokens)
+
+
+                    prompt_embeds, masks, attention_mask = prompt_embeds[:,:args.token_length,:].to(args.device), masks.to(args.device), attention_mask.to(args.device)
+                    
+                    
+                    num_clip_frames = args.num_frames
+                    
+                    
+                    
+                    # 3. for each clip
+                    vid_masks = []
+                    for clip_id in range(0, video_len, num_clip_frames):
+                        frames_ids = [x for x in range(video_len)]
+                        clip_frames_ids = frames_ids[clip_id: clip_id + num_clip_frames]
+                        #print(clip_frames_ids)
+                        clip_len = len(clip_frames_ids)
+
+
+                        
+                        # load the clip images
+                        pframes = []
+                        for t in clip_frames_ids:
+                            frame = frames[t]
+                            img_path = os.path.join(img_folder, video_name, frame + ".jpg")
+                            img = Image.open(img_path).convert('RGB')
+                            origin_w, origin_h = img.size
+                            print(img_path,"--------", np.array(img).shape, origin_w, origin_h)
+                            #print(palette_img_path, np.array(palette_img).shape)
+                            if args.half :
+                                tim = transform256(img).to(args.device)  # list[Img]
+                            else :
+                                tim = transform(img).to(args.device)  # list[Img]
+                            pframes.append(tim)
+                            
+                        imgs = torch.stack(pframes, dim=0).to(args.device)
+                        print(f"{exp} img shape {imgs.shape} {video_len}")
+
+
+                        pred_latents = backbone.forward(
+                            imgs.unsqueeze(0),
+                            prompt_embeds,
+                            t=0,
+                            up_ft_index = 3)
+                        
+                        p_latents = 1 / backbone.vae.config.scaling_factor * pred_latents.detach()
+                        print("unscaled pred latents : ", p_latents.shape, p_latents.max(), p_latents.min())
+                        seg_masks = backbone.vae.decode(p_latents).sample
+                        
+                        print("seg_masks : ", seg_masks.shape, seg_masks.max(), seg_masks.min())
+
+                        
+                        pred_masks = F.interpolate(seg_masks, size=(origin_h, origin_w), mode='bilinear',
+                                                align_corners=False)# t, c, h , w
+                    
+                        pred = pred_masks.mean(1)
+                        pred[pred>0.5] = 1.0
+                        pred[pred<=0.5] = 0.0
+                        pred = pred*(obj_id+1)
+                        print("---------pred :", pred.shape, pred.max(), pred.min())
+                        vid_masks.append(pred)
+
+
+                    vid_masks = torch.cat(vid_masks, dim=0)
+                    print(video_len,"-------->>>>", vid_masks.shape)
+                    anno_masks.append(vid_masks)
+
+                    anno_save_path = os.path.join(save_path_prefix, f"anno_{anno_id}", video, str(obj_id+1))
+                    print("anno_save_path : ",anno_save_path)
+                    if not os.path.exists(anno_save_path):
+                        os.makedirs(anno_save_path)
+                    for f in range(vid_masks.shape[0]):
+                        img_E = Image.fromarray(vid_masks[f].detach().cpu().numpy().astype(np.uint8))
+                        img_E.putpalette(palette)
+                        img_E.save(os.path.join(anno_save_path, '{:05d}.png'.format(f)))
+
+    
+    print("Calculating metrics ....")
+    sum_JFmean = 0
+    for anno_id in range(4):
+    
+        dataset_eval = DAVISEvaluation(davis_root=args.davis_anno_path, task='unsupervised', gt_set='val')
+        results_path = os.path.join(save_path_prefix, f"anno_{anno_id}")
+        metrics_res = dataset_eval.evaluate(results_path)
+
+        J_, F_ = metrics_res['J'], metrics_res['F']
+
+
+        csv_name_global = f'global_results-unsupervised-val.csv'
+        csv_name_per_sequence = f'per-sequence_results-unsupervised-val.csv'
+        csv_name_global_path = os.path.join(results_path, csv_name_global)
+        csv_name_per_sequence_path = os.path.join(results_path, csv_name_per_sequence)
+
+        # Generate dataframe for the general results
+        g_measures = ['J&F-Mean', 'J-Mean', 'J-Recall', 'J-Decay', 'F-Mean', 'F-Recall', 'F-Decay']
+        final_mean = (np.mean(J_["M"]) + np.mean(F_["M"])) / 2.
+        sum_JFmean += final_mean
+
+        g_res = np.array([final_mean, np.mean(J_["M"]), np.mean(J_["R"]), np.mean(J_["D"]), np.mean(F_["M"]), np.mean(F_["R"]),
+                        np.mean(F_["D"])])
+        g_res = np.reshape(g_res, [1, len(g_res)])
+        table_g = pd.DataFrame(data=g_res, columns=g_measures)
+        with open(csv_name_global_path, 'w') as f:
+            table_g.to_csv(f, index=False, float_format="%.5f")
+        print(f'Global results saved in {csv_name_global_path}')
+
+        # Generate a dataframe for the per sequence results
+        seq_names = list(J_['M_per_object'].keys())
+        seq_measures = ['Sequence', 'J-Mean', 'F-Mean']
+        J_per_object = [J_['M_per_object'][x] for x in seq_names]
+        F_per_object = [F_['M_per_object'][x] for x in seq_names]
+        table_seq = pd.DataFrame(data=list(zip(seq_names, J_per_object, F_per_object)), columns=seq_measures)
+        with open(csv_name_per_sequence_path, 'w') as f:
+            table_seq.to_csv(f, index=False, float_format="%.5f")
+        print(f'Per-sequence results saved in {csv_name_per_sequence_path}')
+
+        # Print the results
+        print(f"--------------------------- Global results for val ---------------------------\n")
+        print(table_g.to_string(index=False))
+        print(f"\n---------- Per sequence results for val ----------\n")
+        print(table_seq.to_string(index=False))
+
+    JFm = sum_JFmean/4
+    print(f'{epoch} result : {JFm}')
+    wandb.log({"R-Davis J&F":JFm, 'Steps': args.iteration})
+
+
+    return JFm
+
+
+
+
+
+
+
+def vis_train(savepath,pred,target,re_target,image,iter) :
+
+    samples = random.sample(range(target.shape[0]), 1)
+
+    pred = pred[samples]
+    target = target[samples]
+    image = image[samples]
+    re_target = re_target[samples]
+
+    print(pred.shape)
+
+    _,nf,_,_ = pred.shape
+
+    fig, ax = plt.subplots(4, 1, figsize=(5, 20))
+    j=-1
+    for i in range(1) :
+        
+
+        for f in range(nf) :
+
+            print("---------->", image.shape)
+
+            frame = image[i,f,...].permute(1,2,0).numpy()
+            mx = frame.max()
+            mn = frame.min()
+            frame = (frame - mn)/(mx-mn)
+            gt_mask = target[i,f,...].numpy()
+            re_gt_mask = re_target[i,f,...].numpy()
+            re_gt_mask[re_gt_mask > 0.5] = 1.0
+            re_gt_mask[re_gt_mask <= 0.5] = 0.0
+            seg_mask = pred[i,f,...].numpy()
+            seg_mask[seg_mask > 0.5] = 1.0
+            seg_mask[seg_mask <= 0.5] = 0.0
+            print("inside train vis")
+            print(pred[i,f,...].max(), pred[i,f,...].min(), seg_mask.max(), seg_mask.min())
+            ax[j+1].imshow(frame)
+            ax[j+1].set_title(f'image-{i}')
+            ax[j+2].imshow(frame)
+            ax[j+2].imshow(gt_mask, alpha = 0.5, interpolation= 'none')
+            ax[j+2].set_title(f'GT mask-{i}')
+            ax[j+3].imshow(frame)
+            ax[j+3].imshow(re_gt_mask, alpha = 0.5, interpolation= 'none')
+            ax[j+3].set_title(f'Recon GT mask-{i}')
+            ax[j+4].imshow(frame)
+            ax[j+4].imshow(seg_mask, alpha = 0.5, interpolation= 'none')
+            ax[j+4].set_title(f'Seg mask-{i}')
+        j= j+4
+
+    fig.savefig(f'{savepath}/vis_{iter}.png')
+    plt.close(fig)
+
+
+
+def train_one_epoch(args, backbone, loader, optimizer, epoch):
+
+    max_token_len = -1
+    
+    for idx,batch in enumerate(tqdm(loader)):
+
+        
+
+        img, target_dict = batch
+
+
+        target = target_dict['masks'] # b t c h w
+        img = img # b t c h w
+
+        prompts = target_dict['caption']
+        print(prompts)
+
+
+
+        text_in = backbone.tokenizer(
+            prompts,
+            padding="max_length",
+            max_length=backbone.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt")
+
+        with torch.no_grad() :
+            prompt_embeds = backbone.text_encoder(
+                            text_in.input_ids.to(args.device),#attention_mask=text_in.attention_mask.to(args.device),
+                            )[0]
+        
+        print(prompt_embeds.shape,prompt_embeds.device)
+
+        
+
+        
+        attention_mask = text_in['attention_mask'][:, :args.token_length]
+        print("attn mask : ", attention_mask[0,0:20])
+        masks = ~attention_mask.to(torch.bool)
+        print("mask : ", masks[0,0:20])
+
+        
+
+        img, target, prompt_embeds, masks = img.to(args.device), target.float().to(args.device), prompt_embeds[:,:args.token_length,:].to(args.device), masks.to(args.device)
+
+        print("-------------",img.shape, target.shape, prompt_embeds.shape, masks.shape)
+        print("-------------",img.device, target.device, prompt_embeds.device, masks.device)
+
+        b,nf,_,_,_ = img.shape
+
+        with torch.no_grad() :
+
+            target_r = target.unsqueeze(2).repeat(1,1,3,1,1)#.squeeze(0)
+            target_r = rearrange(target_r, 'b f c h w -> (b f) c h w')
+            print("target_r : ", target_r.shape, target_r.max(), target_r.min())
+            target_latents = backbone.vae.encode(target_r).latent_dist.mode() * backbone.vae.config.scaling_factor
+
+
+        print("target_latent : ", target_latents.shape, target_latents.max(), target_latents.min())
+
+
+
+
+        
+        pred_latents = backbone.forward(
+            img,
+            prompt_embeds,
+            t=0,
+            up_ft_index = 3)#doesn't matter we are using all of the unet
+        
+
+        print("pred_latent : ", pred_latents.shape, pred_latents.max(), pred_latents.min())
+
+        mse = nn.MSELoss()
+        loss = mse(pred_latents, target_latents)
+        
+        print("loss : ", loss)
+        optimizer.zero_grad()  # set_to_none=True is only available in pytorch 1.6+
+        loss.backward()
+
+        optimizer.step()
+
+        wandb.log({"YTVOS loss":loss.detach(), 'Steps': args.iteration})
+
+        args.iteration+=1
+
+        if args.iteration%args.vis_freq == 0 :
+
+            p_latents = 1 / backbone.vae.config.scaling_factor * pred_latents.detach()
+            print("unscaled pred latents : ", p_latents.shape, p_latents.max(), p_latents.min())
+            pred = backbone.vae.decode(p_latents).sample
+            print("pred :", pred.shape, pred.max(), pred.min())
+            pred = rearrange(pred, '(b t) c h w -> b t c h w', b=b,t=nf).mean(2)
+            print("pred : ", pred.shape)
+
+            t_latents = 1 / backbone.vae.config.scaling_factor * target_latents.detach()
+            print("unscaled target latents : ", t_latents.shape, t_latents.max(), t_latents.min())
+            re_target = backbone.vae.decode(t_latents).sample
+            print("re_target :", re_target.shape, re_target.max(), re_target.min())
+            re_target = rearrange(re_target, '(b t) c h w -> b t c h w', b=b,t=nf).mean(2)
+            print("re_target : ", re_target.shape)
+
+            vis_train(args.train_vis,pred.detach().cpu(),target.detach().cpu(),re_target.detach().cpu(),img.detach().cpu(),args.iteration)
+
+
+        if args.iteration%args.eval_freq == 0 :
+
+            JFm = evaluate(args,  backbone, epoch)
+
+            if args.bestJFm < JFm :
+
+                args.bestJFm = JFm
+
+                dict_to_save = {
+                                'unet' : backbone.unet.state_dict(),
+                                'optimizer': optimizer.state_dict(), 
+                                'epoch': epoch, 
+                                'iteration': args.iteration,
+                                'args': args,
+                                'res' : args.bestJFm,
+                                }
+
+                print(dict_to_save.keys())
+
+                torch.save(dict_to_save, os.path.join(args.model_path,f'model_ckpt_best.pth'))
+
+    return
+
+        
+        
+    
+
+
+
+        
+        
+
+
+            
+
+            
+    
+
+def set_path(args):
+    now = datetime.now()
+    dt_string = now.strftime("%Y_%m_%d_%H_%M")
+    args.launch_timestamp = dt_string
+    name_prefix = f"{args.name_prefix}" if args.name_prefix else ""
+    exp_path = (f"{args.output_dir}/{name_prefix}"
+        f"bs{args.batch_size}_lr{args.lr}")
+    log_path = os.path.join(exp_path, 'log')
+    model_path = os.path.join(exp_path, 'model')
+    train_vis = os.path.join(exp_path, 'train_vis')
+    val_vis = os.path.join(exp_path, 'val_vis')
+    if not os.path.exists(log_path): 
+        os.makedirs(log_path)
+    if not os.path.exists(model_path): 
+        os.makedirs(model_path)
+    if not os.path.exists(train_vis): 
+        os.makedirs(train_vis)
+    if not os.path.exists(val_vis): 
+        os.makedirs(val_vis)
+    
+    with open(f'{log_path}/running_command.txt', 'a') as f:
+        json.dump({'command_time_stamp':dt_string, **args.__dict__}, f, indent=2)
+        f.write('\n')
+
+    return log_path, model_path, train_vis, val_vis
+
+
+
+
+def main(args):
+
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="ReferSeg-project",
+
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": args.lr,
+        "weight_decay": args.weight_decay,
+        "epochs": args.epochs,
+
+        },
+        group = 'R-VOS',
+        name= f'{args.name_prefix}_lr{args.lr}_f{args.num_frames}'
+    )
+    wandb.define_metric("Steps")
+    wandb.define_metric("*", step_metric="Steps")
+
+    
+
+    print("device : ", args.device)
+
+    # fix the seed for reproducibility
+    seed = args.seed #+ utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    dataset_train = build_dataset(args.dataset_file, image_set='train', args=args)
+    train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=4, num_workers=16,shuffle=True, drop_last=True)
+
+    
+    backbone = build_vdiff_lean_updown()#VDiffFeatExtractor()
+    backbone.to(args.device)
+    backbone.set_untrained_vae_textenc()
+
+
+    n_parameters = sum(p.numel() for p in backbone.unet.parameters() if p.requires_grad)
+    print('number of trainable params unet:', n_parameters)
+
+
+    for name, param in backbone.unet.named_parameters():
+        if 'temp' in name :
+            print("------",name)
+            param.requires_grad = False
+        else :
+            print(name)
+
+    
+    n_parameters = sum(p.numel() for p in backbone.unet.parameters() if p.requires_grad)
+    print('number of trainable params unet pos temp freeze:', n_parameters)
+
+
+
+
+    
+
+    no_decay = ['.ln_', '.bn', '.bias', '.logit_scale', '.entropy_scale', 'norm']
+
+    unet_param_group_no_decay = []
+    unet_param_group_with_decay = []
+
+    for name, param in backbone.unet.named_parameters():
+        if not param.requires_grad:
+            print(f'Param not requires_grad: {name}')
+            continue
+        if any([i in name for i in no_decay]):
+            print(name)
+            unet_param_group_no_decay.append(param)
+        else:
+            unet_param_group_with_decay.append(param)
+
+        param.register_hook(lambda grad: torch.clamp(grad, -args.clip_val, args.clip_val))
+
+
+    
+
+    params = []
+    
+    params.append({'params': unet_param_group_no_decay, 'lr': args.lr, 'weight_decay': 0.0})
+    params.append({'params': unet_param_group_with_decay, 'lr': args.lr, 'weight_decay': args.weight_decay})
+
+    optimizer = torch.optim.AdamW(params,lr=args.lr,weight_decay=args.weight_decay,amsgrad=args.amsgrad)
+
+
+
+    # resume training
+    if args.resume:
+
+        resume_epoch = -999
+    else:
+        print("no checkpoint---------")
+        resume_epoch = -999
+
+
+    args.iteration = -1
+    args.bestJFm = -1
+
+
+    for epoch in range(max(0, resume_epoch+1), args.epochs):
+
+
+        train_one_epoch(args, backbone, train_loader, optimizer, epoch)
+
+
+        
+
+    
+
+    
+    return
+
+
+
+
+
+    
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('RVOSNet training and evaluation script', parents=[opts.get_args_parser()])
+    args = parser.parse_args()
+    import json
+    print(json.dumps(args.__dict__, indent = 4))
+    args.log_path, args.model_path, args.train_vis, args.val_vis = set_path(args)
+
+    args.vis_freq = 5000
+    args.eval_freq = 10000
+    main(args)
+
+
+
