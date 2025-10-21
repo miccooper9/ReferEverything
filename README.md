@@ -13,13 +13,6 @@
 
 Official PyTorch implementation of the ICCV 2025 paper **"ReferEverything"**.
 
-
-## 📰 News
-
- 
-- **[Oct, 2025]** Released the **code** and pretrained **checkpoints** for **ModelScopeT2V-1.4B** and **Wan2.1-14B**.  
-
-
 ---
 
 ## TL;DR:
@@ -28,7 +21,18 @@ Official PyTorch implementation of the ICCV 2025 paper **"ReferEverything"**.
 
 
 
----
+
+[![Watch the video](https://img.youtube.com/vi/NEZoGG-xUS8/0.jpg)](https://www.youtube.com/watch?v=NEZoGG-xUS8)
+
+
+
+## 📰 News
+
+ 
+- **[Oct, 2025]** Released the **code** and pretrained **checkpoints** for **ModelScopeT2V-1.4B** and **Wan2.1-14B**.  
+
+
+
 
 ## 📦 Installation
 
