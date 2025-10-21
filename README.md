@@ -1,10 +1,10 @@
 # ReferEverything [ICCV 2025]
 
 [**Anurag Bagchi**](https://miccooper9.github.io) · 
-[**Zhipeng Bao**](https://zhipengbao.github.io) · 
-[**Yu-Xiong Wang**](https://yxw.web.illinois.edu) · 
-[**Pavel Tokmakov**](https://paveltokmakov.github.io) · 
-[**Martial Hebert**](https://www.ri.cmu.edu/ri-faculty/martial-hebert/)
+[**Zhipeng Bao**](https://zpbao.github.io) · 
+[**Yu-Xiong Wang**](https://yxw.cs.illinois.edu) · 
+[**Pavel Tokmakov**](https://pvtokmakov.github.io/home) · 
+[**Martial Hebert**](https://www.ri.cmu.edu/ri-faculty/martial-hebert)
 
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![Paper](https://img.shields.io/badge/arxiv-blue)](https://arxiv.org/abs/2410.23287)
@@ -15,6 +15,9 @@ Official PyTorch implementation of the ICCV 2025 paper **"ReferEverything"**.
 
 ---
 
+![demo](assets/demo_medres.gif)
+
+
 ## TL;DR:
  
 > We present **Refer Everything Model (REM)** by re-purposing Text-to-Video generation models to zero-shot segment any concept in a Video using Text. 
@@ -22,7 +25,6 @@ Official PyTorch implementation of the ICCV 2025 paper **"ReferEverything"**.
 
 
 
-[![Watch the video](https://img.youtube.com/vi/NEZoGG-xUS8/0.jpg)](https://www.youtube.com/watch?v=NEZoGG-xUS8)
 
 
 
