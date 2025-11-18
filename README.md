@@ -30,7 +30,7 @@ Official PyTorch implementation of the ICCV 2025 paper **"ReferEverything"**.
 
 ## 📰 News
 
- 
+- **[Coming Soon]** Interactive demos, datasets, Mevis ckpts
 - **[Oct, 2025]** Released the **code** and pretrained **checkpoints** for **ModelScopeT2V-1.4B** and **Wan2.1-14B**.  
 
 
